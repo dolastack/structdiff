@@ -63,10 +63,19 @@ Found 2 differences
 
 ## 🏳️ Flags
 
-| Flag                | Description                                             |
-|---------------------|--------------------------------------------------------|
-| `-f`, `--filter`    | Only show diffs under the specified key path           |
-| `--check`           | Exit with non-zero code if differences are found       |
+| Flag                                         | Description                                                        |
+|-----------------------------------------------|--------------------------------------------------------------------|
+| `-f`, `--filter`                             | Only show diffs under the specified key path                       |
+| `--check`                                    | Exit with non-zero code if differences are found                   |
+| `--quiet`                                    | Suppress all output except errors                                  |
+| `--basic-username`, `--basic-password`        | Use HTTP Basic Auth with the provided username and password        |
+| `--bearer-token TOKEN`                        | Use the specified bearer token for authentication                  |
+| `--sso`                                      | Enable SSO authentication via device code flow                     |
+| `--sso-client-id`                            | Specify the SSO client ID                                          |
+| `--sso-token-url`                            | Specify the SSO token URL                                          |
+| `--aws-sigv4 "service:name;region:region"`    | Use AWS SigV4 signing for requests                                 |
+| `--aws-assume-role ARN`                      | Assume the specified AWS IAM role                                  |
+| `--header KEY=VALUE`                         | Add custom HTTP header(s) to requests                              |
 
 ---
 

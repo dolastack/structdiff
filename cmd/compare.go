@@ -1,116 +1,83 @@
-// cmd/compare.go
 package cmd
 
 import (
-	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
 	"github.com/dolastack/structdiff/internal/parser"
+	"github.com/dolastack/structdiff/pkg/diff"
 	"github.com/spf13/cobra"
 )
 
 var (
-	checkFlag         bool
-	quietFlag         bool
-	filterPaths       []string
-	basicUser         string
-	basicPass         string
-	bearerToken       string
-	oauthClientID     string
-	oauthClientSecret string
-	oauthTokenURL     string
-
-	ssoEnabled  bool
-	ssoClientID string
-	ssoTokenURL string
-	ssoScopes   []string
-
-	awsSigv4      string
-	awsAssumeRole string
+	checkFlag     bool
+	quietFlag     bool
+	filterPaths   []string
+	basicUser     string
+	basicPass     string
+	bearerToken   string
 	customHeaders []string
-
-	tokenCacheEnabled bool
-	tokenCachePath    string
 )
 
 var compareCmd = &cobra.Command{
-	Use:     "compare [file1] [file2]",
-	Short:   "Compare two structured files (JSON, YAML, TOML, XML, INI, CSV)",
-	Example: "structdiff compare file1.yaml file2.yaml --filter=user.name",
-	Args:    cobra.ExactArgs(2),
+	Use:   "compare [file1] [file2]",
+	Short: "Compare two structured data files",
+	Long: `Compare two structured files like JSON, YAML, TOML, XML, INI, or CSV.
+Supports local files, stdin (-), and remote URLs.`,
+	Example: `structdiff compare file1.yaml file2.yaml --filter=user.name
+structdiff compare https://example.com/file1.json  https://example.com/file2.json  --basic-username=admin --basic-password=secret`,
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		file1 := args[0]
 		file2 := args[1]
 
-		// Set auth
-		parser.SetAuth(basicUser, basicPass, bearerToken)
-		parser.SetCustomHeaders(customHeaders)
-
-		// OAuth2
-		if oauthClientID != "" && oauthClientSecret != "" && oauthTokenURL != "" {
-			err := parser.SetOAuthConfig(oauthClientID, oauthClientSecret, oauthTokenURL)
-			if err != nil {
-				return err
+		headersMap := make(map[string]string)
+		for _, h := range customHeaders {
+			parts := strings.SplitN(h, "=", 2)
+			if len(parts) == 2 {
+				headersMap[parts[0]] = resolveValue(parts[1])
+			} else if len(parts) == 1 {
+				headersMap[parts[0]] = ""
 			}
 		}
 
-		// SSO / Device Flow
-		if ssoEnabled {
-			if ssoClientID == "" || ssoTokenURL == "" {
-				return fmt.Errorf("--sso requires --sso-client-id and --sso-token-url")
-			}
-			err := parser.SetDeviceFlowConfig(ssoClientID, ssoTokenURL, ssoScopes)
-			if err != nil {
-				return err
-			}
+		opts := parser.ParseOptions{
+			BasicUser:     basicUser,
+			BasicPassword: resolveValue(basicPass),
+			BearerToken:   resolveValue(bearerToken),
+			CustomHeaders: headersMap,
 		}
 
-		// AWS Sigv4
-		if awsSigv4 != "" {
-			parts := strings.Split(awsSigv4, ";")
-			service := ""
-			region := ""
-
-			for _, p := range parts {
-				kv := strings.SplitN(p, ":", 2)
-				if len(kv) == 2 {
-					switch kv[0] {
-					case "service":
-						service = strings.TrimSpace(kv[1])
-					case "region":
-						region = strings.TrimSpace(kv[1])
-					}
-				}
-			}
-
-			if service == "" || region == "" {
-				return fmt.Errorf("AWS Sigv4 requires service and region")
-			}
-
-			if err := parser.SetAwsSigv4(service, region, awsAssumeRole); err != nil {
-				return err
-			}
-		}
-
-		// Token caching
-		if tokenCacheEnabled {
-			parser.SetTokenCache(tokenCachePath)
-			parser.EnableTokenCache(true)
-		}
-
-		diffOutput, err := diff.CompareFiles(file1, file2, quietFlag, filterPaths)
+		d1, err := parser.ParseFile(file1, opts)
 		if err != nil {
-			return fmt.Errorf("error comparing files: %v", err)
+			return fmt.Errorf("error parsing file1: %v", err)
 		}
 
-		if diffOutput != "" && !quietFlag {
-			fmt.Print(diffOutput)
+		d2, err := parser.ParseFile(file2, opts)
+		if err != nil {
+			return fmt.Errorf("error parsing file2: %v", err)
 		}
 
-		if checkFlag && strings.Contains(diffOutput, "Found") {
+		diffOutput := diff.Compare(d1, d2, filterPaths)
+
+		if diffOutput == "" {
+			if quietFlag {
+				return nil
+			}
+			fmt.Fprintln(os.Stdout, "No differences found.")
+			return nil
+		}
+
+		if quietFlag {
+			return nil
+		}
+
+		count := countLines(diffOutput)
+		fmt.Fprintf(os.Stdout, "Found %d differences\n", count)
+		fmt.Fprint(os.Stdout, diffOutput)
+
+		if checkFlag {
 			os.Exit(1)
 		}
 
@@ -121,7 +88,7 @@ var compareCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(compareCmd)
 
-	// Auth flags
+	// Diff Options
 	compareCmd.Flags().BoolVarP(&checkFlag, "check", "c", false,
 		"Exit with non-zero code if differences found")
 	compareCmd.Flags().BoolVarP(&quietFlag, "quiet", "q", false,
@@ -129,39 +96,44 @@ func init() {
 	compareCmd.Flags().StringArrayVarP(&filterPaths, "filter", "f", nil,
 		"Only show diffs under this key path (e.g., user.address.city)")
 
-	// Basic Auth
-	compareCmd.Flags().StringVar(&basicUser, "basic-username", "", "Username for Basic Auth")
-	compareCmd.Flags().StringVar(&basicPass, "basic-password", "", "Password for Basic Auth")
+	// Authentication Flags
+	compareCmd.Flags().StringVar(&basicUser, "basic-username", "",
+		"Username for Basic Auth")
+	compareCmd.Flags().StringVar(&basicPass, "basic-password", "",
+		"Password for Basic Auth. Can use syntax: @file:/path or $ENV_NAME")
 
-	// Bearer Token
 	compareCmd.Flags().StringVar(&bearerToken, "bearer-token", "",
-		"Bearer token for Auth. Can also be read from a file or env var using syntax: @file:/path or $ENV_NAME")
+		"Bearer token for Auth. Can use syntax: @file:/path or $ENV_NAME")
 
-	// OAuth2
-	compareCmd.Flags().StringVar(&oauthClientID, "oauth-client-id", "", "OAuth2 client ID for token fetch")
-	compareCmd.Flags().StringVar(&oauthClientSecret, "oauth-client-secret", "", "OAuth2 client secret for token fetch")
-	compareCmd.Flags().StringVar(&oauthTokenURL, "oauth-token-url", "", "OAuth2 token URL for client credentials flow")
-
-	// SSO
-	compareCmd.Flags().BoolVar(&ssoEnabled, "sso", false, "Use interactive SSO login (device code flow)")
-	compareCmd.Flags().StringVar(&ssoClientID, "sso-client-id", "", "OAuth2 client ID for SSO")
-	compareCmd.Flags().StringVar(&ssoTokenURL, "sso-token-url", "", "OAuth2 token URL for SSO")
-	compareCmd.Flags().StringArrayVar(&ssoScopes, "sso-scope", []string{"openid", "profile"},
-		"OAuth2 scopes for SSO authentication")
-
-	// AWS Sigv4
-	compareCmd.Flags().StringVar(&awsSigv4, "aws-sigv4", "",
-		"AWS Sigv4 signing config. Format: 'service:name;region:region'")
-	compareCmd.Flags().StringVar(&awsAssumeRole, "aws-assume-role", "",
-		"AWS IAM role ARN to assume. Requires AWS Sigv4 mode (--aws-sigv4)")
-
-	// Custom Headers
+	// HTTP Headers
 	compareCmd.Flags().StringArrayVar(&customHeaders, "header", nil,
 		"Add custom HTTP headers (e.g., 'X-API-Key=mykey')")
 
-	// Token Caching
-	compareCmd.Flags().BoolVar(&tokenCacheEnabled, "token-cache", false,
-		"Enable session token caching")
-	compareCmd.Flags().StringVar(&tokenCachePath, "token-path", "",
-		"Custom path to store tokens (default: ~/.structdiff/token.json")
+	_ = compareCmd.MarkFlagFilename("basic-password") // optional UX hint
+}
+
+// resolveValue resolves value from env var or file
+func resolveValue(val string) string {
+	if val == "" {
+		return ""
+	}
+
+	switch {
+	case strings.HasPrefix(val, "$"):
+		return os.Getenv(strings.TrimPrefix(val, "$"))
+	case strings.HasPrefix(val, "@"):
+		path := strings.TrimPrefix(val, "@")
+		content, _ := os.ReadFile(path)
+		return strings.TrimSpace(string(content))
+	default:
+		return val
+	}
+}
+
+// countLines counts number of lines in diff output
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	return len(strings.Split(s, "\n")) - 1
 }

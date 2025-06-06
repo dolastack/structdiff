@@ -1,154 +1,136 @@
+// pkg/diff/diff.go
+
 package diff
 
 import (
 	"fmt"
-	"go/parser"
 	"reflect"
-	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/fatih/color"
 )
 
-func CompareFiles(file1, file2 string, quiet bool, filterPaths []string) (string, error) {
-	d1, err := parser.ParseFile(file1)
-	if err != nil {
-		return "", err
-	}
-	d2, err := parser.ParseFile(file2)
-	if err != nil {
-		return "", err
+var (
+	diffLines = make(map[string]string)
+	mu        sync.Mutex
+)
+
+// Compare compares two structured values and returns human-readable diff
+func Compare(a, b interface{}, filterPaths []string) string {
+	mu.Lock()
+	defer mu.Unlock()
+
+	diffLines = make(map[string]string)
+	visited := make(map[uintptr]bool)
+
+	compareRecursive(a, b, "", filterPaths, visited)
+
+	if len(diffLines) == 0 {
+		return color.GreenString("No differences found.\n")
 	}
 
-	if d1.Type != d2.Type {
-		return "", fmt.Errorf("files must be of the same type")
+	var sb strings.Builder
+	sb.WriteString(color.MagentaString("Found %d differences\n", len(diffLines)))
+
+	for _, line := range diffLines {
+		sb.WriteString(line)
 	}
 
-	var data1, data2 interface{}
-	if len(filterPaths) == 0 {
-		data1 = d1.Data
-		data2 = d2.Data
-	} else {
-		data1 = applyFilters(d1.Data, filterPaths)
-		data2 = applyFilters(d2.Data, filterPaths)
-	}
-
-	diff := compareRecursive(data1, data2, "")
-	return formatDiff(diff, quiet), nil
+	return sb.String()
 }
 
-func compareRecursive(a, b interface{}, prefix string) string {
-	var sb strings.Builder
+// compareRecursive walks through maps/slices and records mismatches
+func compareRecursive(a, b interface{}, prefix string, filterPaths []string, visited map[uintptr]bool) {
+	if shouldSkip(prefix, filterPaths) {
+		return
+	}
 
 	ta := reflect.TypeOf(a)
 	tb := reflect.TypeOf(b)
 	if ta != tb {
-		sb.WriteString(color.RedString("%sType mismatch: %v vs %v\n", prefix, ta, tb))
-		return sb.String()
+		recordDiff(prefix, color.RedString("%sType mismatch: %v vs %v\n", prefix, ta, tb))
+		return
 	}
 
-	switch aVal := a.(type) {
+	valA := reflect.ValueOf(a)
+	valB := reflect.ValueOf(b)
+
+	// Dereference pointers
+	if valA.Kind() == reflect.Ptr && !valA.IsNil() {
+		valA = valA.Elem()
+	}
+	if valB.Kind() == reflect.Ptr && !valB.IsNil() {
+		valB = valB.Elem()
+	}
+
+	aInterface := valA.Interface()
+	bInterface := valB.Interface()
+
+	addrA := reflect.ValueOf(aInterface).Pointer()
+	if isVisited(addrA, visited) {
+		return
+	}
+	markVisited(addrA, visited)
+
+	addrB := reflect.ValueOf(bInterface).Pointer()
+	markVisited(addrB, visited)
+
+	switch aTyped := aInterface.(type) {
 	case map[string]interface{}:
-		bVal := b.(map[string]interface{})
-		sb.WriteString(compareMaps(aVal, bVal, prefix))
+		bTyped, ok := bInterface.(map[string]interface{})
+		if !ok {
+			recordDiff(prefix, color.RedString("%sType mismatch: expected map\n", prefix))
+			return
+		}
+		compareMaps(aTyped, bTyped, prefix, filterPaths, visited)
 
 	case []interface{}:
-		bVal := b.([]interface{})
-		sb.WriteString(compareSlices(aVal, bVal, prefix))
+		bTyped, ok := bInterface.([]interface{})
+		if !ok {
+			recordDiff(prefix, color.RedString("%sType mismatch: expected slice\n", prefix))
+			return
+		}
+		compareSlices(aTyped, bTyped, prefix, filterPaths, visited)
 
 	default:
-		if fmt.Sprintf("%v", a) != fmt.Sprintf("%v", b) {
-			sb.WriteString(color.YellowString("%sValue mismatch: '%v' vs '%v'\n", prefix, a, b))
+		if fmt.Sprintf("%v", aInterface) != fmt.Sprintf("%v", bInterface) {
+			recordDiff(prefix, color.YellowString("%sValue mismatch: '%v' vs '%v'\n", prefix, aInterface, bInterface))
 		}
 	}
-
-	return sb.String()
 }
 
-func compareMaps(a, b map[string]interface{}, prefix string) string {
-	var sb strings.Builder
-
-	allKeys := make(map[string]bool)
-	for k := range a {
-		allKeys[k] = true
+// recordDiff adds a message to diffLines only once per path
+func recordDiff(path, message string) {
+	mu.Lock()
+	defer mu.Unlock()
+	if _, exists := diffLines[path]; !exists {
+		diffLines[path] = message
 	}
-	for k := range b {
-		allKeys[k] = true
-	}
-
-	for k := range allKeys {
-		foundInA := false
-		foundInB := false
-		var keyA, keyB string
-
-		for ka := range a {
-			if strings.ToLower(ka) == strings.ToLower(k) {
-				keyA = ka
-				foundInA = true
-				break
-			}
-		}
-		for kb := range b {
-			if strings.ToLower(kb) == strings.ToLower(k) {
-				keyB = kb
-				foundInB = true
-				break
-			}
-		}
-
-		if !foundInA {
-			sb.WriteString(color.RedString("%sKey '%s' missing in first file\n", prefix, k))
-			continue
-		}
-		if !foundInB {
-			sb.WriteString(color.RedString("%sKey '%s' missing in second file\n", prefix, k))
-			continue
-		}
-
-		newPrefix := k
-		if prefix != "" {
-			newPrefix = prefix + "." + k
-		}
-
-		sb.WriteString(compareRecursive(a[keyA], b[keyB], newPrefix))
-	}
-
-	return sb.String()
 }
 
-func compareSlices(a, b []interface{}, prefix string) string {
-	var sb strings.Builder
-
-	minLen := len(a)
-	if len(b) < minLen {
-		minLen = len(b)
-		sb.WriteString(color.RedString("%sSlice length mismatch: %d vs %d\n", prefix, len(a), len(b)))
-	}
-
-	for i := 0; i < minLen; i++ {
-		newPrefix := fmt.Sprintf("%s[%d]", prefix, i)
-		sb.WriteString(compareRecursive(a[i], b[i], newPrefix))
-	}
-
-	return sb.String()
+// isVisited checks if a pointer was already processed
+func isVisited(ptr uintptr, visited map[uintptr]bool) bool {
+	return visited[ptr]
 }
 
-func formatDiff(diff string, quiet bool) string {
-	if diff == "" {
-		if quiet {
-			return ""
+// markVisited marks a pointer as visited
+func markVisited(ptr uintptr, visited map[uintptr]bool) {
+	visited[ptr] = true
+}
+
+// shouldSkip returns true if current path doesn't match any filters
+func shouldSkip(path string, filterPaths []string) bool {
+	if len(filterPaths) == 0 || path == "" {
+		return false
+	}
+
+	matched := false
+	for _, fpath := range filterPaths {
+		if strings.HasPrefix(path+".", fpath+".") || path == fpath {
+			matched = true
+			break
 		}
-		return color.GreenString("No differences found.\n")
 	}
-
-	if quiet {
-		return ""
-	}
-
-	re := regexp.MustCompile(`(?m)^`)
-	lines := re.Split(strings.TrimSpace(diff), -1)
-	count := len(lines)
-
-	summary := color.MagentaString("Found %d differences\n", count)
-	return summary + diff
+	return !matched
 }
