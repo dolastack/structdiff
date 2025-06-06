@@ -1,0 +1,17 @@
+basic-username: admin
+basic-password: $STRUCTDIFF_PASSWORD
+bearer-token: @secrets/bearer.txt
+oauth:
+  client-id: myclient
+  client-secret: mysecret
+  token-url: https://auth.example.com/token 
+aws-sigv4:
+  service: execute-api
+  region: us-east-1
+  role: arn:aws:iam::123456789012:role/MyRole
+filter:
+  - user.name
+  - address.city
+color: auto
+quiet: false
+check: true

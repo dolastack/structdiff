@@ -1,0 +1,57 @@
+project_name: structdiff
+
+builds:
+  - id: structdiff
+    main: main.go
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    binaries:
+      - structdiff
+    env:
+      - CGO_ENABLED=0
+
+archives:
+  - replacements:
+      darwin: Darwin
+      linux: Linux
+      windows: Windows
+      amd64: x86_64
+      arm64: aarch64
+
+nfpms:
+  - id: default
+    package_name: structdiff
+    vendor: "Your Name <you@example.com>"
+    homepage: "https://github.com/dolastack/structdiff" 
+    maintainer: "Your Name <you@example.com>"
+    description: "A CLI tool to compare structured data files like JSON, YAML, TOML, XML, INI, CSV"
+    license: MIT
+    bindir: /usr/bin/
+    files: |
+      dist/structdiff_* -> /usr/bin/structdiff
+
+    rpm:
+      signatures:
+        enabled: false
+
+    deb:
+      dependencies:
+        - "libc6 >= 2.23"
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  name: snapshot-{{ .Commit }}
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
